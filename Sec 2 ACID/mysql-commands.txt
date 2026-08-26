@@ -1,0 +1,15 @@
+docker container run \
+    --name mysql_dummy \
+    --publish 3306:3306 \
+    --env MYSQL_ROOT_PASSWORD=root \
+    --detach \
+    mysql:latest
+
+
+Download the mysql client
+https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-26.7.1-macos15-arm64.dmg
+
+
+ 192.168.7.122 is my  container host
+./mysql --host 192.168.7.122 --user root --password=root
+

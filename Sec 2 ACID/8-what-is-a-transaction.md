@@ -1,371 +1,334 @@
-# What Is a Transaction? — Interview Notes (SQL, PostgreSQL, MongoDB)
+# What Is a Transaction?
 
-> **Course:** Fundamentals of Database Engineering — Sec 2: ACID  
-> **Goal:** Understand transactions deeply enough to explain them in a final-year CSE interview.
+> **Course:** Fundamentals of Database Engineering — Sec 2: ACID
+> **Lecture:** What is a transaction
+> **Goal:** After this note you can watch a $100 transfer fail in two different ways, say exactly what a transaction is, and point at which ACID letter each camera is filming.
 
----
-
-## 1. One-Minute Interview Definition
-
-A **transaction** is a **single logical unit of work** — one or more database operations that must succeed **together** or fail **together**. There is no partial success.
-
-Think of a **group dinner bill**:
-
-1. Four friends order food. The rule is: **either everyone pays their share and the bill is closed, or nobody pays and the order is cancelled.**
-2. You cannot have Alice charged but Bob not charged for the same meal.
-3. Once the cashier stamps the receipt, a power cut must **not** erase the payment.
-
-That dinner bill is a transaction. Databases use the same idea for bank transfers, order placement, inventory updates, and any multi-step write that must stay correct under crashes and concurrency.
+Later notes go deep on one letter: [Atomicity](9-Atomicity.md) · [Isolation](10-Isolation.md) · [Consistency](11.Consistency.md) · [Durability](12.Durability.md). This note is the picture they all share.
 
 ---
 
-## 2. ACID Properties — In Depth
+## 0. After this note you can...
 
-ACID = **Atomicity, Consistency, Isolation, Durability**. These are the four guarantees a transactional database engine tries to provide.
-
-### 2.1 Atomicity — All or Nothing
-
-| Aspect | Explanation |
-|--------|-------------|
-| **Definition** | Every operation inside the transaction either completes fully, or the entire transaction is rolled back as if it never happened. |
-| **Analogy** | The whole table pays the bill, or the waiter tears up the order slip. No one leaves having paid half. |
-| **What the engine does** | Keeps an **undo log** (or marks writes as aborted). On `ROLLBACK` or crash before commit, it reverses in-memory changes. On `COMMIT`, all changes become permanent as one unit. |
-| **Failure story** | Transfer $100 from Alice to Bob: debit succeeds, credit fails → atomicity rolls back the debit. Balance stays correct. |
-| **Say this in an interview** | *"Atomicity means the transaction is indivisible. Either all statements commit or none do. The engine uses undo information so partial work is never left visible after rollback or crash."* |
+- Draw one box that is **committed truth**, another that is **T1's private view**, and a third that is **data files on disk** — and keep them different.
+- Predict what happens if Alice is debited **without** `BEGIN`, then the credit to Bob errors.
+- Predict the same two statements **inside** `BEGIN` … `ROLLBACK`.
+- Name the four ACID cameras on that same transfer in one sentence each.
+- Say the sentence interviewers wait for: **COMMIT means the log is durable, not that table files were rewritten.**
 
 ---
 
-### 2.2 Consistency — Valid State to Valid State
+## 1. The one picture
 
-| Aspect | Explanation |
-|--------|-------------|
-| **Definition** | A transaction moves the database from one **valid** state to another **valid** state, respecting constraints (PK, FK, CHECK, NOT NULL, business rules). |
-| **Analogy** | The restaurant cash drawer must still match the menu rules — you cannot sell a dish that does not exist, or end with negative inventory. |
-| **What the engine does** | Enforces schema constraints at statement or commit time. **Important nuance:** the engine guarantees constraint enforcement; **your application** must write transactions that preserve business invariants (e.g., total money in the system). |
-| **Failure story** | Two withdrawals of $80 from a $100 account run concurrently without proper isolation → balance goes negative. That violates consistency even if each SQL statement alone is valid. |
-| **Say this in an interview** | *"Consistency means invariants hold before and after the transaction. The DB enforces declared constraints; the app must design transactions so business rules like 'balance ≥ 0' are preserved, often with isolation levels or locking."* |
+First National Bank has two rows. That is the whole universe for lectures 8, 9, 10, and 12.
 
----
-
-### 2.3 Isolation — Concurrent Transactions Don't Interfere
-
-| Aspect | Explanation |
-|--------|-------------|
-| **Definition** | Concurrent transactions behave as if they run in some serial order; intermediate uncommitted states are hidden according to the chosen isolation level. |
-| **Analogy** | Two tables paying at the same time should not grab each other's change from the tip jar. Each table sees a consistent view of the bill until payment is final. |
-| **What the engine does** | Uses **locks**, **MVCC (Multi-Version Concurrency Control)**, or both to control visibility of in-flight changes. |
-| **Failure story** | Transaction A reads a balance, B updates and commits, A reads again and sees a different value → **non-repeatable read**. |
-
-#### SQL Standard Isolation Levels (ISO/IEC 9075)
-
-| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read |
-|-----------------|------------|---------------------|--------------|
-| **Read Uncommitted** | Possible | Possible | Possible |
-| **Read Committed** | Prevented | Possible | Possible |
-| **Repeatable Read** | Prevented | Prevented | Possible |
-| **Serializable** | Prevented | Prevented | Prevented |
-
-**Phenomena explained simply:**
-
-- **Dirty read** — reading another transaction's uncommitted data.
-- **Non-repeatable read** — reading the same row twice, getting different committed values.
-- **Phantom read** — re-running a range query returns new rows another transaction inserted.
-
-**PostgreSQL note:** default is `READ COMMITTED`. PostgreSQL treats `READ UNCOMMITTED` as `READ COMMITTED`. Its `REPEATABLE READ` also prevents phantom reads in practice.
-
-**Say this in an interview:** *"Isolation is tunable. Most OLTP systems use Read Committed for speed. Financial or inventory-critical flows may need Repeatable Read or Serializable, trading concurrency for correctness."*
-
----
-
-### 2.4 Durability — Committed Survives Crash
-
-| Aspect | Explanation |
-|--------|-------------|
-| **Definition** | Once a transaction is committed, its effects persist even after power loss, OS crash, or database restart. |
-| **Analogy** | After the receipt is stamped (committed), a blackout must not erase the payment record. |
-| **What the engine does** | Writes changes to a **Write-Ahead Log (WAL)** or **journal** and **flushes that log to stable storage** before telling the client "success." Actual table/data files may be updated later. |
-| **Failure story** | Server crashes 2 seconds after `COMMIT`. On restart, the engine replays the WAL/journal and restores all committed work. |
-| **Say this in an interview** | *"Durability does not mean every table page is on disk at commit time. It means the log record describing the change is on disk (or on a majority of replicas). Recovery replays the log after a crash."* |
-
----
-
-## 3. How a Transaction Is Made — Step by Step
-
-### The Engine's Mental Model (Sequential Thinking)
-
-Use this order when an interviewer asks *"What happens when I COMMIT?"*
-
-```
-Step 1 → BEGIN / START TRANSACTION
-Step 2 → Read required pages into memory (buffer pool / cache)
-Step 3 → Apply changes in memory (dirty pages)
-Step 4 → Append description of each change to WAL/journal (in memory first)
-Step 5 → Isolation rules hide uncommitted work from other sessions
-Step 6 → COMMIT: flush WAL/journal to disk (fsync) — then return success
-Step 7 → Later: checkpoint/background writer flushes dirty data pages to data files
-Step 8 → Crash recovery: find last checkpoint, REDO log records after it
+```text
+accounts
+┌────────┬───────┬─────────┐
+│ id     │ name  │ balance │
+├────────┼───────┼─────────┤
+│ 1      │ Alice │ 100    │
+│ 2      │ Bob   │  50    │
+└────────┴───────┴─────────┘
+total money in the system = 150
 ```
 
-### Analogy Mapping
-
-| Real World | PostgreSQL | MongoDB (WiredTiger) |
-|------------|------------|----------------------|
-| Waiter's scratch pad | Shared buffers (RAM) | WiredTiger cache (RAM) |
-| Carbon-copy receipt book | WAL (Write-Ahead Log) | Journal files |
-| Stamping the receipt | `COMMIT` + WAL fsync | `commitTransaction` + journal sync |
-| Putting cash in the drawer | Checkpoint → data files | Checkpoint → `.wt` data files |
-
-### Transaction Lifecycle Diagram
-
-```mermaid
-flowchart LR
-  beginNode[BEGIN] --> work[ReadWriteInMemory]
-  work --> logBuf[AppendToWALOrJournal]
-  logBuf --> decide{Success?}
-  decide -->|yes| flushLog[FlushLogToDisk]
-  flushLog --> ack[ReturnCOMMIT]
-  ack --> later[LaterCheckpointDataFiles]
-  decide -->|no| undo[ROLLBACKUndoInMemory]
-```
-
-### Detailed Steps
-
-1. **Begin** — Explicit (`BEGIN`) or implicit (autocommit: each single statement is its own mini-transaction).
-2. **Pin/read pages** — If the target page is not in memory, read it from disk into the buffer pool/cache.
-3. **Modify in memory** — Update the in-memory copy. Page becomes **dirty** (changed but not yet written to data files).
-4. **Log the change** — Engine appends a WAL/journal record: *"page X, offset Y, old → new"*. This enables crash recovery (REDO).
-5. **Isolation enforcement** — Other transactions see or don't see your changes based on isolation level and MVCC snapshot.
-6. **Commit** — Flush WAL/journal buffers to disk. Only **after** the log is durable does the engine acknowledge `COMMIT` to the client.
-7. **Background flush** — Dirty pages are written to table/data files during **checkpoints** or by background writers. Old log files can be recycled.
-8. **Crash recovery** — On restart: load last checkpoint, replay WAL/journal from that point forward (REDO unapplied changes).
-
-> **Key interview insight:** `COMMIT` returned ≠ table files updated on disk.  
-> `COMMIT` returned = **log is durable**; data files catch up later.
-
----
-
-## 4. Two Commit Processes — Memory vs Disk
-
-Modern databases almost always use **Process A**. Process B is the naive/historical approach interviewers mention to test whether you understand WAL.
-
----
-
-### Process A — In-Memory Work, Log Commit to Disk (Modern Default)
-
-**How it works:**
-
-1. Transaction modifies data **in RAM** (shared buffers / WiredTiger cache).
-2. Each change is recorded in the **WAL/journal** (also in RAM first).
-3. On `COMMIT`, only the **log is flushed to disk** (`fsync`).
-4. **Dirty data pages stay in memory** until a later checkpoint or background flush.
-
-**Used by:** PostgreSQL (default sync commit), MongoDB WiredTiger, MySQL InnoDB, Oracle, SQL Server.
-
-#### Advantages
-
-| Advantage | Why |
-|-----------|-----|
-| **High throughput** | WAL/journal is written **sequentially** — much faster than random data-page writes. |
-| **Group commit** | One `fsync` can commit many concurrent small transactions. |
-| **Crash-safe without syncing every page** | REDO from WAL reconstructs any dirty page not yet flushed. |
-| **Point-in-time recovery** | Archived WAL enables backup + replay to any moment (PostgreSQL). |
-| **Lower commit latency** | Client waits for a small sequential log write, not full table rewrite. |
-
-#### Disadvantages
-
-| Disadvantage | Why |
-|--------------|-----|
-| **Extra disk space for logs** | WAL/journal files grow between checkpoints. |
-| **Recovery time** | More WAL since last checkpoint = longer crash recovery. |
-| **Misleading mental model** | Developers think `COMMIT` = data on disk; it often means log on disk only. |
-| **Async variants lose recent commits** | `synchronous_commit=off` or delayed journal flush can lose last N transactions on crash (not corruption — **loss**, not **corruption**). |
-
----
-
-### Process B — Force Data Files to Disk on Every Commit
-
-**How it works:**
-
-Every commit also flushes all modified **table/index/data pages** to their on-disk files immediately (or relies only on periodic checkpoints with no durable log).
-
-**Used by:** Rarely in production OLTP. Sometimes discussed as a naive design or in specialized engines. Some NoSQL systems with checkpoint-only durability approximate this.
-
-#### Advantages
-
-| Advantage | Why |
-|-----------|-----|
-| **Data files always current** | No gap between "committed" and "on disk in data files." |
-| **Conceptually simple** | What you write is what is on disk — easy to explain. |
-| **Smaller recovery replay window** | If pages are synced, less log replay needed. |
-
-#### Disadvantages
-
-| Disadvantage | Why |
-|--------------|-----|
-| **Random I/O on every commit** | Table pages scatter across disk — extremely slow for OLTP. |
-| **Terrible TPS for small transactions** | Each `COMMIT` waits for multiple page flushes. |
-| **High latency** | `fsync` on many random pages >> one sequential log write. |
-| **Torn pages** | Partial page writes on crash still need full-page writes or doublewrite protection. |
-
----
-
-### Weaker Variants — Don't Confuse These with Process A
-
-| Variant | Behavior | Trade-off |
-|---------|----------|-----------|
-| **Async commit** (PostgreSQL `synchronous_commit=off`) | Returns success before WAL hits disk; WAL writer flushes later | Faster; may lose last ~few transactions on crash |
-| **Delayed journal flush** (MongoDB default ~100ms) | Journal buffered in memory; synced periodically unless `j: true` | Hard shutdown may lose buffered writes |
-| **Unlogged tables** (PostgreSQL) | No WAL for table data | Fast writes; table truncated/emptied after crash |
-| **In-memory storage engine** (MongoDB Enterprise) | No journal; data in RAM only | `j: true` acks immediately; durability via replica majority |
-| **Checkpoint-only durability** | Survives only if change made it into last checkpoint (~60s in MongoDB) | Simple but large data-loss window |
-
-### When Would You Pick Each? (Interview Answer)
-
-- **Bank transfers, orders, inventory** → Process A with **synchronous commit** + **majority write concern** (`w: majority, j: true`).
-- **High-volume analytics, session counters, caches** → Process A with **async commit** or unlogged tables; accept possible loss of last few writes.
-- **Never recommend Process B for OLTP** unless the interviewer is explicitly asking about the historical naive approach or why WAL was invented.
-
----
-
-## 5. Code Snippets — Same Bank Transfer in Three Dialects
-
-### Scenario
-
-Transfer **$100** from account `Alice` to account `Bob`. Both accounts must exist; Alice must have enough balance. All-or-nothing.
-
----
-
-### 5.1 SQL (Portable / ISO SQL)
+A **transfer** is not one SQL statement. It is two:
 
 ```sql
--- Start a transaction
-START TRANSACTION;
--- Alternative syntaxes:
--- BEGIN;                  -- PostgreSQL, MySQL
--- BEGIN TRANSACTION;      -- SQL Server
-
--- Step 1: Debit Alice (with balance check)
-UPDATE accounts
-SET balance = balance - 100.00
-WHERE name = 'Alice' AND balance >= 100.00;
-
--- Check that exactly one row was updated
--- (In application code: if rows_affected != 1, ROLLBACK)
-
--- Step 2: Credit Bob
-UPDATE accounts
-SET balance = balance + 100.00
-WHERE name = 'Bob';
-
--- If both succeed:
-COMMIT;
-
--- If anything failed:
--- ROLLBACK;
-
-
--- Set isolation level for a critical transfer
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-START TRANSACTION;
--- ... transfer statements ...
-COMMIT;
-
-
--- Savepoint pattern (partial rollback inside a transaction)
-START TRANSACTION;
-
-INSERT INTO audit_log (event) VALUES ('transfer started');
-
-SAVEPOINT before_transfer;
-
-UPDATE accounts SET balance = balance - 100.00 WHERE name = 'Alice';
-
--- Oops — something went wrong with Bob's account
-ROLLBACK TO SAVEPOINT before_transfer;  -- undoes Alice debit only
-
--- audit_log insert is still alive
-COMMIT;
+UPDATE accounts SET balance = balance - 100 WHERE name = 'Alice';
+UPDATE accounts SET balance = balance + 100 WHERE name = 'Bob';
 ```
+
+Those two statements are one **logical unit of work**. Either both become the new truth, or neither does. That unit is a **transaction**.
+
+```text
+                    the transfer (one transaction)
+                    ┌─────────────────────────────────────┐
+                    │  debit Alice          credit Bob     │
+                    │  100 → 0             50 → 150      │
+                    └─────────────────────────────────────┘
+                              all of this, or none of this
+```
+
+Without wrapping them, each statement is its own tiny transaction (autocommit). That is how money vanishes.
 
 ---
 
-### 5.2 PostgreSQL
+## 2. Simulation — watch it happen
+
+Shared starting snapshot. Every later tick updates this same box.
+
+```text
+START
+committed truth     Alice 100   Bob 50
+T1 private view     (same — no open transaction yet)
+WAL                 (empty of this transfer)
+data files          Alice 100   Bob 50
+```
+
+### Simulation A — no BEGIN (autocommit). Credit fails.
+
+PostgreSQL, MySQL, and MongoDB all **commit each successful statement immediately** unless you open a transaction.
+
+**Pause and predict:** After the first `UPDATE` succeeds and the second errors, what are Alice and Bob?
 
 ```sql
--- PostgreSQL default isolation: READ COMMITTED
+-- T1, autocommit on (the default)
+UPDATE accounts SET balance = balance - 100 WHERE name = 'Alice';
+-- success. That statement COMMITTED.
 
-BEGIN;
+UPDATE accounts SET balance = balance + 100 WHERE name = 'Nobody';
+-- 0 rows (or an error). There is nothing left to roll back.
+```
 
-UPDATE accounts
-SET balance = balance - 100.00
-WHERE name = 'Alice' AND balance >= 100.00;
+**Reveal:**
 
--- In psql you can check:
--- SELECT NOT FOUND;  -- or use GET DIAGNOSTICS in PL/pgSQL
+```text
+Tick A1 — debit committed as its own transaction
+committed truth     Alice   0   Bob 50     ← already the new truth
+T1 private view     Alice   0   Bob 50
+WAL (fsynced)       COMMIT of "Alice 100 → 0"
+data files          may still say 100 until checkpoint; WAL says 0
 
-UPDATE accounts
-SET balance = balance + 100.00
-WHERE name = 'Bob';
+Tick A2 — credit fails. There is no open transaction.
+committed truth     Alice   0   Bob 50     ← $100 vanished
+T1 private view     Alice   0   Bob 50
+WAL                 no Bob credit was ever committed
+data files          Alice 0 (after recovery / checkpoint)
+```
 
-COMMIT;
+Alice is poorer. Bob is unchanged. Total money is **50**. The database did exactly what you asked, statement by statement. It did not know those two lines were one business action.
 
+That is why we have transactions.
 
--- Demonstrating atomicity: second statement fails → first is rolled back
-BEGIN;
+### Simulation B — BEGIN, then the same error, then ROLLBACK.
 
-UPDATE accounts SET balance = balance - 100.00 WHERE name = 'Alice';
+**Pause and predict:** Same two statements, but wrapped. After `ROLLBACK`, what are Alice and Bob?
 
--- This will fail (e.g., violates a constraint or bad SQL)
-UPDATE accounts SET balance = balance + 100.00 WHERE name = 'NonExistentUser';
+```sql
+BEGIN;   -- or START TRANSACTION;
 
--- ERROR → entire transaction aborted
+UPDATE accounts SET balance = balance - 100 WHERE name = 'Alice';
+-- success, but NOT committed. Pencil, not ink.
+
+UPDATE accounts SET balance = balance + 100 WHERE name = 'Nobody';
+-- fails
+
 ROLLBACK;
-
--- Alice's balance is unchanged — atomicity preserved
-
-
--- Savepoints
-BEGIN;
-UPDATE accounts SET balance = balance - 50.00 WHERE name = 'Alice';
-SAVEPOINT sp1;
-UPDATE accounts SET balance = balance + 50.00 WHERE name = 'Bob';
--- If needed:
-ROLLBACK TO SAVEPOINT sp1;
-COMMIT;
-
-
--- Durability tuning (per transaction)
-BEGIN;
-SET LOCAL synchronous_commit = on;   -- default: wait for WAL fsync (safest)
--- SET LOCAL synchronous_commit = off;  -- faster, may lose recent commits on crash
-UPDATE accounts SET balance = balance - 100.00 WHERE name = 'Alice';
-UPDATE accounts SET balance = balance + 100.00 WHERE name = 'Bob';
-COMMIT;
-
--- CHECKPOINT is admin-only — forces immediate WAL checkpoint (not for normal use)
--- CHECKPOINT;
 ```
 
-**What happens under the hood on `COMMIT` in PostgreSQL:**
+**Reveal:**
 
-1. Changes live in **shared buffers** (RAM).
-2. WAL records describe each change in **WAL buffers** (RAM).
-3. `COMMIT` triggers `XLogFlush()` — WAL written and `fsync`'d to disk.
-4. Client receives "COMMIT" success.
-5. Dirty pages flushed later by **background writer** or **checkpoint**.
+```text
+Tick B1 — BEGIN. Engine assigns a transaction id (XID).
+committed truth     Alice 100   Bob 50
+T1 private view     Alice 100   Bob 50     T1 sees its own writes from here on
+WAL                 XID 42 started
+data files          Alice 100   Bob 50
+
+Tick B2 — debit Alice. Other cashiers still see 100.
+committed truth     Alice 100   Bob 50     ← Isolation: other sessions do not see pencil
+T1 private view     Alice   0   Bob 50
+WAL (not fsynced)   XID 42: Alice 100 → 0
+data files          Alice 100   Bob 50
+
+Tick B3 — credit fails. Transaction is doomed.
+committed truth     Alice 100   Bob 50
+T1 private view     (aborted — further SQL is rejected until ROLLBACK)
+WAL                 no COMMIT record for XID 42
+data files          Alice 100   Bob 50
+
+Tick B4 — ROLLBACK
+committed truth     Alice 100   Bob 50     ← as if the transfer never started
+T1 private view     Alice 100   Bob 50
+WAL                 XID 42 aborted (or simply: no commit record)
+data files          Alice 100   Bob 50
+```
+
+Same two SQL statements. Opposite bank. The only difference is **the unit of work**.
+
+### Simulation C — both statements succeed, then COMMIT.
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE name = 'Alice';
+UPDATE accounts SET balance = balance + 100 WHERE name = 'Bob';
+COMMIT;
+```
+
+```text
+Tick C1 — both writes in RAM, not committed
+committed truth     Alice 100   Bob  50
+T1 private view     Alice   0   Bob 150
+WAL (not fsynced)   XID 42: Alice 100→0 ; Bob 50→150
+data files          Alice 100   Bob  50
+
+Tick C2 — COMMIT. Engine fsyncs the WAL, then tells the client "ok".
+committed truth     Alice   0   Bob 150     ← now everyone sees this
+T1 private view     Alice   0   Bob 150
+WAL (fsynced)       COMMIT record for XID 42
+data files          still Alice 100 Bob 50 until checkpoint
+```
+
+**The sentence to keep:** after `COMMIT`, other sessions see the new balances. The **table files** may still hold the old bytes. Recovery will replay the WAL. That is lecture 12. You only need the picture now:
+
+```text
+scratch pad (RAM)     →   receipt book (WAL)     →   cash drawer (data files)
+  dirty pages               fsync on COMMIT            checkpoint, later
+```
 
 ---
 
-### 5.3 MongoDB
+## 3. Why the engine does that
 
-MongoDB has **two levels** of atomicity. Prefer the simpler one when possible.
+### The unit of work
 
-#### Option A — Single-Document Atomic Update (Preferred)
+```
+Step 1 → BEGIN / START TRANSACTION   (or autocommit: the engine begins for you, per statement)
+Step 2 → Engine assigns a transaction id
+Step 3 → Reads come from pages already in RAM, or from disk into the buffer pool
+Step 4 → Writes change RAM (dirty pages) and append a description to the WAL/journal buffer
+Step 5 → Other sessions do not see those writes yet (isolation — lecture 10)
+Step 6 → COMMIT: flush WAL to disk, then return success to the client
+         ROLLBACK: hide or undo the RAM changes; no commit record
+Step 7 → Later: checkpoint writes dirty data pages to table files
+```
 
-One document update is **always atomic**. No explicit transaction needed if you embed related data.
+A session **always sees its own uncommitted writes**. Isolation is about **other** sessions. If you `SELECT` Alice after debiting her in the same `BEGIN`, you will see `0`. That does not prove isolation. Isolation is what the cashier at the next terminal does **not** see.
+
+### Four cameras on the same transfer
+
+Once you can see Simulation B and C, ACID is four cameras pointed at that box.
+
+| Camera | What it films on the Alice → Bob transfer |
+|--------|------------------------------------------|
+| **A Atomicity** | You never observe "Alice 0, Bob 50" as committed truth. All of the transfer, or none. [9-Atomicity.md](9-Atomicity.md) |
+| **C Consistency** | After COMMIT or ROLLBACK, the rules still hold: PK/FK/CHECK, and "total money = 150" if your transaction was written to preserve it. [11.Consistency.md](11.Consistency.md) |
+| **I Isolation** | While T1's transfer is pencil, T2's `SELECT` still sees Alice 100 (at Read Committed and above). [10-Isolation.md](10-Isolation.md) |
+| **D Durability** | After COMMIT returns, a power cut must not restore Alice to 100. The stamped receipt (WAL) is on disk. [12.Durability.md](12.Durability.md) |
+
+They are not four separate features you turn on. They are four promises about **one unit of work**.
+
+```text
+T1: BEGIN
+    debit Alice          ─┐
+    credit Bob            ├─ Atomicity: both become truth together, or neither
+    COMMIT               ─┘
+         │
+         ├─ Isolation: T2 cannot read the debit until COMMIT
+         ├─ Consistency: after COMMIT, constraints + your invariants hold
+         └─ Durability: after COMMIT returns, crash recovery will restore the transfer
+```
+
+### Two commit processes
+
+Modern engines use **Process A**. Process B is the naive design that explains why WAL exists.
+
+```text
+Process A (modern)                         Process B (naive)
+─────────────────                          ──────────────────
+1. Change pages in RAM                    1. Write table pages to disk now
+2. Append WAL in RAM                       2. fsync those random pages
+3. COMMIT = fsync the WAL only             3. Then ack the client
+4. Ack the client
+5. Checkpoint data pages later
+
+Scratch pad → stamp receipt book            Put cash in the drawer on every sale
+then later put cash in the drawer          Slow. Random I/O. Still needs a log
+                                           for crash safety anyway.
+```
+
+| | Process A | Process B |
+|--------|-----------|-----------|
+| What COMMIT waits for | Sequential log fsync | Random data-page fsyncs |
+| Data files at COMMIT | May be stale | Current |
+| Crash after COMMIT | REDO the WAL | Pages already there (torn-page risk remains) |
+| Used by | PostgreSQL, InnoDB, MongoDB WiredTiger | Almost never in OLTP |
+
+Weaker cousins of Process A (still not Process B): `synchronous_commit = off`, InnoDB `innodb_flush_log_at_trx_commit = 2`, MongoDB's default ~100 ms journal. They ack **before** freeze-frame "WAL on disk." They may **lose** the last few commits on crash. They do not **corrupt**. Details in [12.Durability.md](12.Durability.md).
+
+---
+
+## 4. Same idea in three engines
+
+Setup once. Then the same transfer.
+
+```sql
+CREATE TABLE accounts (
+  id      INT PRIMARY KEY,
+  name    TEXT NOT NULL,
+  balance NUMERIC(10,2) NOT NULL
+);
+INSERT INTO accounts VALUES (1, 'Alice', 100.00), (2, 'Bob', 50.00);
+```
+
+### PostgreSQL
+
+Default isolation is `READ COMMITTED`. Default durability waits for WAL fsync (`synchronous_commit = on`).
+
+```sql
+BEGIN;
+
+UPDATE accounts
+SET balance = balance - 100.00
+WHERE name = 'Alice' AND balance >= 100.00;
+
+UPDATE accounts
+SET balance = balance + 100.00
+WHERE name = 'Bob';
+
+COMMIT;
+```
+
+After an error inside the block, PostgreSQL **aborts the whole block**. Further SQL is rejected until `ROLLBACK`:
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 100.00 WHERE name = 'Alice';
+UPDATE accounts SET balance = balance + 100.00 WHERE name = 'Nobody';
+-- you cannot COMMIT your way out of this
+ROLLBACK;
+```
+
+Savepoints undo part of a still-alive transaction:
+
+```sql
+BEGIN;
+INSERT INTO audit_log (event) VALUES ('transfer started');
+SAVEPOINT before_transfer;
+UPDATE accounts SET balance = balance - 100 WHERE name = 'Alice';
+ROLLBACK TO SAVEPOINT before_transfer;  -- debit gone; audit row remains
+COMMIT;
+```
+
+On `COMMIT`: shared buffers hold dirty pages → `XLogFlush()` fsyncs WAL → client is told success → checkpointer / bgwriter flush data files later.
+
+### Generic SQL / InnoDB (MySQL)
+
+```sql
+START TRANSACTION;
+
+UPDATE accounts
+SET balance = balance - 100.00
+WHERE name = 'Alice' AND balance >= 100.00;
+
+UPDATE accounts
+SET balance = balance + 100.00
+WHERE name = 'Bob';
+
+COMMIT;
+```
+
+Same idea. InnoDB keeps an **undo log** (before-images) as well as a **redo log**. Live `ROLLBACK` physically restores Alice. Crash recovery is ARIES-style: redo everything after the checkpoint, then undo losers. [9-Atomicity.md](9-Atomicity.md) walks that.
+
+### MongoDB
+
+Two levels. Prefer the first.
+
+**One document is already atomic.** Embed Alice and Bob in one document and you do not need a multi-document transaction:
 
 ```javascript
-// Atomic debit+credit inside ONE document (embedded accounts array)
 db.bank.updateOne(
   {
     _id: "bank_main",
@@ -385,186 +348,91 @@ db.bank.updateOne(
     ]
   }
 );
-// Single-document = atomic by design. Fast. No transaction overhead.
 ```
 
-#### Option B — Multi-Document ACID Transaction (MongoDB 4.0+)
-
-Use when updates span **multiple documents, collections, or databases**.
+**Multi-document** (separate `accounts` documents) needs a session. Always retry transient errors.
 
 ```javascript
-// mongosh / Node.js style
-
 const session = db.getMongo().startSession();
-
 try {
   session.startTransaction({
     readConcern:  { level: "snapshot" },
-    writeConcern: { w: "majority" }   // implies j: true by default on replica sets
+    writeConcern: { w: "majority" }
   });
-
   const accounts = session.getDatabase("bank").accounts;
 
-  // Debit Alice
-  const debitResult = accounts.updateOne(
+  const debit = accounts.updateOne(
     { name: "Alice", balance: { $gte: 100 } },
     { $inc: { balance: -100 } }
   );
+  if (debit.modifiedCount !== 1) throw new Error("Alice cannot pay");
 
-  if (debitResult.modifiedCount !== 1) {
-    throw new Error("Insufficient funds or Alice not found");
-  }
-
-  // Credit Bob
-  accounts.updateOne(
-    { name: "Bob" },
-    { $inc: { balance: 100 } }
-  );
-
+  accounts.updateOne({ name: "Bob" }, { $inc: { balance: 100 } });
   session.commitTransaction();
-  print("Transfer committed.");
-} catch (error) {
+} catch (e) {
   session.abortTransaction();
-  print("Transfer rolled back: " + error.message);
 } finally {
   session.endSession();
 }
 ```
 
-#### Production Retry Logic (Required for Multi-Doc Transactions)
+WiredTiger: writes live in cache → one journal commit record on success → abort frees the in-memory buffer (nothing hits the journal) → checkpoint (~60 s) writes `.wt` files.
 
-MongoDB transactions can fail with transient errors. Always retry:
-
-```javascript
-async function commitWithRetry(session) {
-  try {
-    await session.commitTransaction();
-  } catch (error) {
-    if (error.hasErrorLabel("UnknownTransactionCommitResult")) {
-      // Commit result unknown — retry commit
-      return commitWithRetry(session);
-    }
-    throw error;
-  }
-}
-
-async function runTransactionWithRetry(txnFunc, session) {
-  while (true) {
-    session.startTransaction({
-      readConcern:  { level: "snapshot" },
-      writeConcern: { w: "majority" },
-      readPreference: "primary"
-    });
-    try {
-      await txnFunc(session);
-      await commitWithRetry(session);
-      break;
-    } catch (error) {
-      await session.abortTransaction();
-      if (error.hasErrorLabel("TransientTransactionError")) {
-        continue; // retry whole transaction
-      }
-      throw error;
-    }
-  }
-}
-```
-
-**What happens under the hood on `commitTransaction` in MongoDB:**
-
-1. Changes applied in **WiredTiger cache** (RAM).
-2. **Journal records** describe each write (buffered in memory).
-3. Commit triggers journal sync (especially with `j: true` / `w: majority`).
-4. Client receives commit acknowledgment.
-5. **Checkpoint (~every 60s)** flushes dirty cache pages to `.wt` data files.
-6. Crash recovery: find last checkpoint → replay journal entries after it.
+| Concept | PostgreSQL | InnoDB | MongoDB |
+|---------|------------|--------|---------|
+| Open a unit of work | `BEGIN` | `START TRANSACTION` | `startTransaction` (or skip, if one document) |
+| Memory | shared buffers | buffer pool | WiredTiger cache |
+| Log | WAL `pg_wal/` | redo log | journal `WiredTigerLog.*` |
+| COMMIT waits for | WAL fsync | redo fsync (`innodb_flush_log_at_trx_commit=1`) | journal sync when `j: true` / majority |
+| Data files | checkpoint / bgwriter | checkpoint | checkpoint ~60 s |
+| Default isolation | Read Committed | Repeatable Read | snapshot (inside a txn) |
+| Single-statement atomicity | autocommit per statement | same | **per document**, always |
 
 ---
 
-## 6. Side-by-Side: PostgreSQL vs MongoDB Durability Path
+## 5. Traps + 60-second interview version
 
-```mermaid
-flowchart TB
-  subgraph pg [PostgreSQL]
-    pgBegin[BEGIN] --> pgMem[ModifySharedBuffers]
-    pgMem --> pgWal[AppendWALRecord]
-    pgWal --> pgCommit[COMMIT]
-    pgCommit --> pgFsync[WALFsyncToDisk]
-    pgFsync --> pgAck[ReturnSuccessToClient]
-    pgAck --> pgCkpt[CheckpointLater]
-    pgCkpt --> pgData[FlushDirtyPagesToDataFiles]
-  end
+### Traps
 
-  subgraph mongo [MongoDB WiredTiger]
-    mgStart[startTransaction] --> mgMem[ModifyWiredTigerCache]
-    mgMem --> mgJour[AppendJournalRecord]
-    mgJour --> mgCommit[commitTransaction]
-    mgCommit --> mgSync[JournalSyncToDisk]
-    mgSync --> mgAck[ReturnSuccessToClient]
-    mgAck --> mgCkpt[CheckpointEvery60s]
-    mgCkpt --> mgData[FlushDirtyPagesToWtFiles]
-  end
-```
+| Trap | Reality |
+|------|---------|
+| "`SELECT` in the same session saw the debit, so isolation is broken" | A session always sees its own pencil. Isolation is the **other** terminal. |
+| "`COMMIT` wrote the table to disk" | COMMIT wrote the **log**. Table files catch up at checkpoint. |
+| "Autocommit means there are no transactions" | Every statement **is** a transaction. You just cannot group two of them. |
+| "MongoDB is not transactional" | One document always is. Multi-document needs an explicit session + retry. |
+| "I can `COMMIT` after an error in PostgreSQL" | No. The block is dead until `ROLLBACK` (or `ROLLBACK TO SAVEPOINT`). |
 
-| Concept | PostgreSQL | MongoDB (WiredTiger) |
-|---------|------------|----------------------|
-| Memory store | Shared buffers | WiredTiger cache |
-| Write-ahead log | WAL (`pg_wal/`) | Journal (`journal/WiredTigerLog.*`) |
-| Commit durability | WAL `fsync` on sync commit | Journal sync on `j: true` / ~100ms interval |
-| Data file flush | Checkpoint / bgwriter | Checkpoint ~60 seconds |
-| Crash recovery | REDO WAL from last checkpoint | Replay journal after last checkpoint |
-| Default isolation | READ COMMITTED | Snapshot (for transactions) |
-| Single-op atomicity | Per statement in autocommit | Per document always |
+### 60 seconds
 
----
+> *"A transaction is one logical unit of work — here, debit Alice and credit Bob. Either both become committed truth, or the database looks as if neither ran. Autocommit makes each statement its own transaction, which is how a failed second UPDATE can leave Alice poorer and Bob unchanged. BEGIN groups them. ACID is four cameras on that unit: Atomicity is all-or-nothing, Consistency is valid state to valid state, Isolation is what concurrent sessions are allowed to see, Durability is that a COMMIT the client already heard about survives a crash. COMMIT does not mean data files were rewritten. It means the WAL or journal is on disk. Data pages flush later at checkpoint."*
 
-## 7. How to Use This in an Interview
+### If they go deeper
 
-### 60-Second Spoken Answer
+| Question | Point them at |
+|---------|----------------|
+| Half-applied transfer, process still alive vs crash | [9-Atomicity.md](9-Atomicity.md) |
+| What T2 sees while T1 has not committed | [10-Isolation.md](10-Isolation.md) |
+| Constraints vs "total money = 150" | [11.Consistency.md](11.Consistency.md) |
+| `write()` vs `fsync`, freeze-frames of a crash | [12.Durability.md](12.Durability.md) |
+| Type it in two terminals | [13-ACID-by-practical-examples.md](13-ACID-by-practical-examples.md) |
 
-> *"A transaction is a logical unit of work where all operations succeed together or fail together — the ACID properties guarantee this.*
->
-> *Atomicity means all-or-nothing via undo logs. Consistency means constraints and business rules hold before and after. Isolation controls what concurrent transactions see — tuned via isolation levels from Read Committed to Serializable. Durability means once committed, data survives crashes — achieved by writing to a Write-Ahead Log and flushing it to disk before acknowledging the client.*
->
-> *The key insight most candidates miss: COMMIT does not mean table files are on disk. It means the WAL or journal is durable. Actual data pages are flushed later during checkpoints. This log-first design gives sequential I/O and group commit, which is why modern databases are fast.*
->
-> *In PostgreSQL I use BEGIN/COMMIT with synchronous_commit for financial data. In MongoDB, I prefer single-document atomic updates via schema design, and only use multi-document transactions when truly needed, with retry logic for transient errors and majority write concern for durability."*
+### Cheat sheet
 
-### If They Go Deeper — Answer Ladder
-
-| Question | Answer direction |
-|----------|------------------|
-| *"What is a dirty read?"* | Reading uncommitted data from another transaction. Prevented at Read Committed and above. |
-| *"What happens on COMMIT internally?"* | Flush WAL/journal → ack client → dirty pages flushed later at checkpoint. |
-| *"WAL vs data files?"* | WAL = receipt book (durable at commit). Data files = cash drawer (updated later). |
-| *"synchronous_commit=off?"* | Faster commits; may lose last few transactions on crash; never corrupts. |
-| *"MongoDB j: true?"* | Forces journal sync before ack; hard shutdown won't lose that write. |
-| *"When not to use MongoDB transactions?"* | When you can embed data in one document — denormalize instead; transactions add latency and require retry logic. |
-| *"Why not flush data pages every commit?"* | Random I/O on every commit destroys OLTP throughput; WAL makes commits sequential and fast. |
+1. Transaction = one logical unit of work.
+2. Autocommit = one statement, one transaction, committed on success.
+3. `BEGIN` … `COMMIT` / `ROLLBACK` groups statements.
+4. Committed truth ≠ T1's private view ≠ data files.
+5. COMMIT = log durable. Checkpoint = data files catch up.
+6. ACID = four cameras on that unit, not four unrelated features.
 
 ---
 
-## 8. Cheat Sheet (Glance Before the Interview)
+## 6. Sources
 
-1. **Transaction** = logical unit of work; all succeed or all fail.
-2. **ACID** = Atomicity, Consistency, Isolation, Durability.
-3. **COMMIT** = log durable, **not** necessarily data files on disk.
-4. **WAL / Journal** = write-ahead log; enables REDO crash recovery.
-5. **Checkpoint** = flush dirty memory pages to data files; recycle old log.
-6. **Process A (modern)** = memory work + log commit → fast, safe.
-7. **Process B (naive)** = force data files every commit → slow, random I/O.
-8. **Isolation levels** = Read Uncommitted → Read Committed → Repeatable Read → Serializable.
-9. **PostgreSQL default** = READ COMMITTED; sync WAL on commit.
-10. **MongoDB** = single-doc atomic always; multi-doc needs session + transaction + retry; prefer embedding over transactions.
-
----
-
-## 9. Sources
-
-- [PostgreSQL: Write-Ahead Logging (WAL)](https://www.postgresql.org/docs/current/wal-intro.html)
-- [PostgreSQL: Asynchronous Commit](https://www.postgresql.org/docs/current/wal-async-commit.html)
+- [PostgreSQL: Write-Ahead Logging](https://www.postgresql.org/docs/current/wal-intro.html)
 - [PostgreSQL: Transaction Isolation](https://www.postgresql.org/docs/current/transaction-iso.html)
+- [PostgreSQL: Asynchronous Commit](https://www.postgresql.org/docs/current/wal-async-commit.html)
 - [MongoDB: Journaling](https://www.mongodb.com/docs/manual/core/journaling/)
-- [MongoDB: WiredTiger Storage Engine & Checkpoints](https://www.mongodb.com/docs/manual/core/wiredtiger/)
-- [MongoDB: Transactions in Applications](https://www.mongodb.com/docs/manual/core/transactions-in-applications/)
-- ISO/IEC 9075 (SQL Standard) — transaction isolation framework
+- [MongoDB: Transactions](https://www.mongodb.com/docs/manual/core/transactions/)
+- [MongoDB: WiredTiger](https://www.mongodb.com/docs/manual/core/wiredtiger/)
+- ISO/IEC 9075 — transaction isolation framework
